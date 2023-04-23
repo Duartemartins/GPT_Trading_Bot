@@ -1,7 +1,9 @@
 # Stock Sentiment AI Trading Bot
 
 This is a stock sentiment trading bot that uses news articles and GPT-3.5-turbo from OpenAI to analyze stock sentiment and make buy/sell decisions based on the sentiment score. It currently supports backtesting for Google, Apple, and Tesla.
-Requirements
+
+
+## Requirements
 
 - Python 3.7 or higher
 - pip for installing dependencies

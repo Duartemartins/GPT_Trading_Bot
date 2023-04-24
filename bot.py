@@ -19,6 +19,8 @@ import pickle
 import random
 import re
 import json
+import time
+from openai.error import RateLimitError
 
 # Ignore warnings related to datetime and deprecation
 warnings.filterwarnings("ignore", category=UserWarning, message="DatetimeFormatter scales now only accept a single format.")
@@ -60,16 +62,42 @@ class SentimentStrategy(Strategy):
                 
                 # Truncate the news_text to fit within the token limit
                 max_tokens = 4096 - 50  # Subtract 50 tokens for the prompt and other parts of the message
-                truncated_news_text = truncate_text(news_text, max_tokens)
+               # Split the news_text into chunks that fit the token limit
+                news_chunks = []
+                tokens = news_text.split()
+                chunk = []
+                current_tokens = 0
+                for token in tokens:
+                    if current_tokens + len(token) + 1 <= max_tokens:
+                        chunk.append(token)
+                        current_tokens += len(token) + 1
+                    else:
+                        news_chunks.append(" ".join(chunk))
+                        chunk = [token]
+                        current_tokens = len(token) + 1
+                if chunk:
+                    news_chunks.append(" ".join(chunk))
 
-                sentiment = get_sentiment(truncated_news_text)
-                print(f"Sentiment: {sentiment}")
+                # Get decisions for each chunk
+                decisions = []
+                for chunk in news_chunks:
+                    decision = get_sentiment(chunk, stock_symbol)
+                    decisions.append(decision)
+                    print(f"Chunk decision: {decision}")
 
-                if sentiment > self.params['sentiment_threshold']:
+                # Determine the final decision by counting occurrences of "Yes", "No", and "Unknown"
+                decision_counts = {'Yes': 0, 'No': 0, 'Unknown': 0}
+                for decision in decisions:
+                    decision_counts[decision] += 1
+
+                # Choose the decision with the highest count
+                final_decision = max(decision_counts, key=decision_counts.get)
+                print(f"Final decision for {current_date}: {final_decision}")
+                if final_decision == "Yes":
                     print(f"{current_date}: Buying")
                     self.decisions[current_date_str] = "buy"
                     self.buy()
-                elif sentiment < -self.params['sentiment_threshold']:
+                elif final_decision == "No":
                     print(f"{current_date}: Selling")
                     self.decisions[current_date_str] = "sell"
                     self.sell()
@@ -110,29 +138,50 @@ def sentiment_strategy_wrapper(stock_symbol):
     return WrappedSentimentStrategy
 
 # Function to get sentiment using OpenAI GPT-3.5
-def get_sentiment(text):
+def get_sentiment(text, stock_symbol):
     openai.api_key = os.environ["OPENAI_API_KEY"]
-    prompt = f"Forget all your previous instructions. Pretend you are a financial expert. You are a financial expert with stock recommendation experience. Rate the sentiment of \"{text}\" on a scale from -1 (very negative) to 1 (very positive)."
-
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a financial expert with stock recommendation experience."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=50,
-        n=1,
-        temperature=0.5,
-    )
-
-    sentiment_text = response.choices[0].message['content'].strip()
-    print(f"Sentiment text: {sentiment_text}")  # Add this line to print the sentiment_text
-    sentiment_numbers = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", sentiment_text)
+    prompt = f"Forget all your previous instructions. Pretend you are a financial expert. You are a financial expert with stock recommendation experience. Answer “YES” if good news, “NO” if bad news, or “UNKNOWN” if uncertain in the first line. Then elaborate with one short and concise sentence on the next line. Is this headline good or bad for the stock price of {stock_symbol} in the short term? Headline: {text}"
     
-    if sentiment_numbers:
-        sentiment = float(sentiment_numbers[0])
+    max_retries = 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a financial expert with stock recommendation experience."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=50,
+                n=1,
+                temperature=0.5,
+            )
+            break  # If the API call is successful, exit the loop
+        except openai.error.APIError as e:
+            if e.code == 502:
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(5)  # Wait for 5 seconds before retrying
+                else:
+                    raise e  # If all retries have been exhausted, raise the error
+            else:
+                raise e
+
+    # If max_retries is reached, return "Unknown"
+    if retry_count == max_retries:
+        print("Reached max retries. Returning 'Unknown'.")
+        return "Unknown"
+
+    sentiment_text = response.choices[0].message['content'].strip().split('\n')[0]
+    print(f"Sentiment text: {sentiment_text}")  # Add this line to print the sentiment_text
+
+    # Use a regular expression to extract the answer from the first line
+    answer = re.search(r'(YES|NO|UNKNOWN)', sentiment_text, re.IGNORECASE)
+    if answer:
+        sentiment = answer.group(0).capitalize()
     else:
-        sentiment = 0.0
+        sentiment = "Unknown"
 
     return sentiment
 
@@ -237,6 +286,10 @@ def scrape_news_data(stock, start_date, end_date):
 
     news_df['datetime'] = news_df['datetime'].dt.tz_localize(None)  # Remove timezone information
     news_df.set_index('datetime', inplace=True)
+    
+    # Aggregate headlines by date
+    news_df = news_df.groupby('datetime').agg({'news': ' '.join})
+    
     # Save the API response to the cache
     cache_key = f"{stock}_{start_date}_{end_date}"
     cache_data[cache_key] = news_df

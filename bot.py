@@ -429,51 +429,47 @@ stocks = {
     "Tesla": "TSLA"
 }
 
-# Iterate over each stock and run the backtest
-for company_name, stock_symbol in stocks.items():
-    print(f"Running backtest for {company_name} ({stock_symbol})")
-    
-    news_df, news_start_date, news_end_date = get_historical_news_data(company_name, '2019-01-01T00:00:00', '2019-12-31T23:59:59')
-    if 'datetime' in news_df.columns:
-        news_df = news_df.rename(columns={'datetime': 'Date'})
+date_ranges = [('2019-01-01T00:00:00', '2019-12-31T23:59:59'),
+               ('2020-01-01T00:00:00', '2020-12-31T23:59:59'),
+               ('2021-01-01T00:00:00', '2021-12-31T23:59:59')]
 
-    # news_df['datetime'] = pd.to_datetime(news_df['datetime'])
-    print(f"news_start_date: {news_start_date}, news_end_date: {news_end_date}")
-    
-    news_start_date, news_end_date = ('2019-01-01T00:00:00', '2019-12-31T23:59:59')
-        
-    stock_data = get_stock_data(stock_symbol, news_start_date, news_end_date)
-    stock_data.index = pd.to_datetime(stock_data.index)
-    # print(stock_data.columns)
-    # print(stock_data.index)
-    # stock_data['Date'] = pd.to_datetime(stock_data['Date'])
+date_ranges = [('2019-01-01T00:00:00', '2019-12-31T23:59:59'),
+               ('2020-01-01T00:00:00', '2020-12-31T23:59:59'),
+               ('2021-01-01T00:00:00', '2021-12-31T23:59:59')]
 
-    news_df.set_index('Date', inplace=True)
-    # print(news_df.columns)
-    # print(news_df.index)
-    print(f"{stock_symbol}_filtered dataframe:")
-    print(stock_data)
-    print("news_df dataframe:")
-    print(news_df)
+for start_date, end_date in date_ranges:
+    for company_name, stock_symbol in stocks.items():
+        print(f"Running backtest for {company_name} ({stock_symbol}) for the period {start_date} to {end_date}")
 
-    # Merge the two dataframes using inner join
-    combined_df = pd.merge(stock_data, news_df, how='inner',left_index=True, right_index=True)
-    print(combined_df.isnull().sum())
-    print(combined_df.dtypes)
+        news_df, news_start_date, news_end_date = get_historical_news_data(company_name, start_date, end_date)
+        if 'datetime' in news_df.columns:
+            news_df = news_df.rename(columns={'datetime': 'Date'})
 
+        print(f"news_start_date: {news_start_date}, news_end_date: {news_end_date}")
 
-    # Drop the datetime column and reset the index
-    # combined_df.drop(columns=['datetime'], inplace=True)
-    # combined_df.set_index('Date', inplace=True)
+        stock_data = get_stock_data(stock_symbol, start_date, end_date)
+        stock_data.index = pd.to_datetime(stock_data.index)
 
-    print(f"combined dataframe: {combined_df}")
-    strategy_class = sentiment_strategy_wrapper(stock_symbol)
+        news_df.set_index('Date', inplace=True)
+        print(f"{stock_symbol}_filtered dataframe:")
+        print(stock_data)
+        print("news_df dataframe:")
+        print(news_df)
 
-    bt = Backtest(combined_df, strategy_class, cash=10000, commission=.002, exclusive_orders=True)
-    
-    stats = bt.run()
-    display(stats)
-    bt.plot()
+        # Merge the two dataframes using inner join
+        combined_df = pd.merge(stock_data, news_df, how='inner',left_index=True, right_index=True)
+        print(combined_df.isnull().sum())
+        print(combined_df.dtypes)
+
+        print(f"combined dataframe: {combined_df}")
+        strategy_class = sentiment_strategy_wrapper(stock_symbol)
+
+        bt = Backtest(combined_df, strategy_class, cash=10000, commission=.002, exclusive_orders=True)
+
+        stats = bt.run()
+        display(stats)
+        bt.plot()
+
 
 # for company_name, stock_symbol in stocks.items():
 #     class BuyAndHoldStrategy(Strategy):

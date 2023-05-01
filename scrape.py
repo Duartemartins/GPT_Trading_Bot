@@ -144,8 +144,6 @@ def scrape_nyt_data(company_name, start_date, end_date):
     return news_data
 
 
-
-
 def scrape_news_data(company_name, start_date, end_date):
     if company_name not in stocks:
         raise ValueError(f"Unknown company name: {company_name}")

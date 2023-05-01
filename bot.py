@@ -2,25 +2,21 @@ import os
 import pandas as pd
 from datetime import datetime
 from newsapi import NewsApiClient
-from backtesting import Backtest
-from backtesting import Strategy
-import openai
-import matplotlib
-from IPython.display import display
-import warnings
-import yfinance as yf
-import requests
-import time
-import os
-import requests
-import pandas as pd
-import os.path
-import pickle
-import random
-import re
-import json
-import time
-from openai.error import RateLimitError
+from backtesting import Backtest, Strategy
+import openai 
+import matplotlib 
+import http.client
+from IPython.display import display 
+import warnings 
+import yfinance as yf 
+import requests 
+import time 
+from urllib.parse import urlparse 
+import pickle 
+import random 
+import re 
+import json  
+from openai.error import RateLimitError  
 
 # Ignore warnings related to datetime and deprecation
 warnings.filterwarnings("ignore", category=UserWarning, message="DatetimeFormatter scales now only accept a single format.")
@@ -47,15 +43,15 @@ class SentimentStrategy(Strategy):
 
     def next(self):
         i = len(self.data) - 1  # Get the index of the most recent data point
-        current_date = self.data.index[i].date()
+        current_date = self.data.index[i]
         current_date_str = str(current_date)  # Convert date to string
 
         if current_date_str in self.decisions:
             print(f"Decision for {current_date} is already made: {self.decisions[current_date_str]}")
             if self.decisions[current_date_str] == "buy":
-                self.sell()
-            elif self.decisions[current_date_str] == "sell":
                 self.buy()
+            elif self.decisions[current_date_str] == "sell":
+                self.sell()
         else:
             if not pd.isna(self.data['news']).any():
                 news_text = self.data['news'][i]  # Get news text for the current date
@@ -215,10 +211,148 @@ def get_historical_news_data(stock, start_date, end_date):
     return news_df, news_start_date, news_end_date
 
 
+def format_date(date_str):
+    dt = datetime.strptime(date_str.split('T')[0], "%Y-%m-%d")
+    return dt.strftime('%Y%m%d')
 
-def scrape_news_data(stock, start_date, end_date):
+def scrape_rapidapi_data(stock_ticker, start_date, end_date):
+    rapidapi_key = os.environ.get('rapidapi_key')
+    if not rapidapi_key:
+        raise ValueError("RAPIDAPI_SECRET environment variable not set")
+
+    rapidapi_url = "https://contextualwebsearch-websearch-v1.p.rapidapi.com/api/search/NewsSearchAPI"
+    rapidapi_headers = {
+        "x-rapidapi-host": "contextualwebsearch-websearch-v1.p.rapidapi.com",
+        "x-rapidapi-key": rapidapi_key
+    }
+
+    rapidapi_querystring = {
+        "q": stock_ticker,
+        "pageNumber": "1",
+        "pageSize": "50",
+        "autoCorrect": "true",
+        "safeSearch": "false",
+        "fromPublishedDate": start_date,
+        "toPublishedDate": end_date
+    }
+
+    rapidapi_response = requests.get(rapidapi_url, headers=rapidapi_headers, params=rapidapi_querystring).json()
+    news_data = []
+    for web_page in rapidapi_response["value"]:
+        date_published = web_page["datePublished"]
+        pub_date = datetime.strptime(date_published.split('.')[0], "%Y-%m-%dT%H:%M:%S").date()
+        title = web_page["title"]
+        source = "RapidAPI"  # Adding the source
+        news_data.append([pub_date, title, source])
+    return news_data
+
+def scrape_techcrunch_data(search_string, start_date, end_date):
+    # Check if start_date and end_date are strings and convert to datetime
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, "%Y-%m-%dT%H:%M:%S")
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, "%Y-%m-%dT%H:%M:%S")
+    url = 'https://techcrunch.com/'
+    post_type = 'posts'
+    url_parsed = urlparse(url)
+    conn = http.client.HTTPSConnection(url_parsed.netloc)
+
+    news_data = []
+    
+    page = 1
+    while True:
+        endpoint = f"/wp-json/wp/v2/{post_type}?page={page}&per_page=100&after={start_date.isoformat()}&before={end_date.isoformat()}&search={search_string}".replace(' ', '%20')
+        conn.request("GET", endpoint)
+        response = conn.getresponse()
+        data = response.read().decode("utf-8")
+
+        # Parse the JSON response and extract the fields we need
+        for post in json.loads(data):
+            date = datetime.strptime(post['date'], '%Y-%m-%dT%H:%M:%S')
+            if date.date() < start_date.date():
+                # Reached the end of the date range
+                return news_data
+            if start_date.date() <= date.date() <= end_date.date() and search_string in post['title']['rendered']:
+                title = post['title']['rendered']
+                source = "TechCrunch"
+                news_data.append([date.date(), title, source])
+
+        # Check if we have reached the last page
+        links = response.getheader('Link')
+        if not links or 'rel="next"' not in links:
+            break
+
+        # Move to the next page
+        page += 1
+
+    return news_data
+
+
+def scrape_nyt_data(company_name, start_date, end_date):
+    nyt_key = os.environ.get('NYT')  # Set your NYTimes API key as an environment variable
+    if not nyt_key:
+        raise ValueError("NYT_API_KEY environment variable not set")
+
+    start_date = format_date(start_date)
+    end_date = format_date(end_date)
+
+    url = 'https://api.nytimes.com/svc/search/v2/articlesearch.json'
+    params = {
+        'q': company_name,
+        'api-key': nyt_key,
+        'sort': 'oldest',
+        'begin_date': start_date,
+        'end_date': end_date,
+    }
+
+    params['page'] = 0
+    retries = 0  # Initialize retries variable
+    max_retries = 3
+    backoff_factor = 2
+
+    news_data = []
+
+    while params['page'] < 100:
+        response = requests.get(url, params=params)
+        while retries < max_retries:
+            if response.status_code == 200:
+                break
+            elif response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', '0'))
+                wait_time = max(backoff_factor ** retries, retry_after)
+                print(f"Rate limit exceeded. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+                retries += 1
+                response = requests.get(url, params=params)
+            else:
+                print(response.text)
+                print(f"Error fetching page {params['page']}: {response.status_code}")
+                retries = max_retries
+        if retries == max_retries:
+            print("Max retries reached. Skipping this function.")
+            return news_data
+        response_json = response.json()
+        articles = response_json.get('response', {}).get('docs', [])
+        if not articles:
+            break
+
+        for article in articles:
+            pub_date = datetime.strptime(article["pub_date"].split('T')[0], "%Y-%m-%d").date()
+            headline = article["headline"]["main"]
+            source = "New York Times"
+            news_data.append([pub_date, headline, source])
+
+        params['page'] += 1
+
+    return news_data
+
+
+def scrape_news_data(company_name, start_date, end_date):
+    if company_name not in stocks:
+        raise ValueError(f"Unknown company name: {company_name}")
+    stock_ticker = stocks[company_name]
     # Define the cache file path
-    cache_file = f"{stock}_news_data_cache.pkl"
+    cache_file = f"{stock_ticker}_news_data_cache.pkl"
 
     # Check if the cache file exists
     if os.path.exists(cache_file):
@@ -228,71 +362,29 @@ def scrape_news_data(stock, start_date, end_date):
     else:
         cache_data = {}
 
-    api_key = os.environ.get('NYT')  # Set your NYTimes API key as an environment variable
-    if not api_key:
-        raise ValueError("NYTIMES_API_KEY environment variable not set")
-
-    url = 'https://api.nytimes.com/svc/search/v2/articlesearch.json'
-    params = {
-        'q': stock,
-        'api-key': api_key,
-        'sort': 'oldest',
-        'fq': f'organizations.contains:("{stock}") AND pub_date:[{start_date}T00:00:00Z TO {end_date}T23:59:59Z]'
-    }
-
     news_data = []
-    params['page'] = 0
-    retries = 0  # Initialize retries variable
-    max_retries = 10
-    backoff_factor = 2
 
-    while params['page'] < 100:
-        while retries < max_retries:
-            response = requests.get(url, params=params)
+    # Check cache and fetch data for each source
+    for source, scraper in [('RapidAPI', scrape_rapidapi_data), 
+                            ('NYT', scrape_nyt_data), 
+                            ('TechCrunch', scrape_techcrunch_data)]:
+        cache_key = f"{stock_ticker}_{source}_{start_date}_{end_date}"
+        if cache_key in cache_data:
+            news_data += cache_data[cache_key]
+        else:
+            if source == 'TechCrunch':
+                start_date = datetime.strptime(start_date, "%Y-%m-%dT%H:%M:%S")
+                end_date = datetime.strptime(end_date, "%Y-%m-%dT%H:%M:%S")
 
-            if response.status_code == 200:
-                break
-            elif response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', '0'))
-                wait_time = max(backoff_factor ** retries, retry_after)
-                print(f"Rate limit exceeded. Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-                retries += 1
-            else:
-                print(f"Error fetching page {params['page']}: {response.status_code}")
-                retries = max_retries
-                break
+            fetched_data = scraper(company_name, start_date, end_date)
+            news_data += fetched_data
 
-        if retries == max_retries:
-            print("Max retries reached. Aborting.")
-            break
+            # Save the API response to the cache
+            cache_data[cache_key] = fetched_data
 
-        response_json = response.json()
-        articles = response_json.get('response', {}).get('docs', [])
-        if not articles:
-            break
-
-        for article in articles:
-            article_data = [article['pub_date'], article['headline']['main']]
-            if article_data not in news_data:  # Check if the data is not already in the DataFrame
-                news_data.append(article_data)
-                print(article_data)
-
-        params['page'] += 1
-
-    news_df = pd.DataFrame(news_data, columns=['datetime', 'news'])
-    news_df['datetime'] = pd.to_datetime(news_df['datetime'], utc=True).dt.date  # Convert to date only (no time)
-    news_df['datetime'] = pd.to_datetime(news_df['datetime'])  # Convert back to datetime
-
-    news_df['datetime'] = news_df['datetime'].dt.tz_localize(None)  # Remove timezone information
-    news_df.set_index('datetime', inplace=True)
-    
-    # Aggregate headlines by date
-    news_df = news_df.groupby('datetime').agg({'news': ' '.join})
-    
-    # Save the API response to the cache
-    cache_key = f"{stock}_{start_date}_{end_date}"
-    cache_data[cache_key] = news_df
+    news_df = pd.DataFrame(news_data, columns=['Date', 'news', 'source'])
+    news_df.set_index('Date', inplace=True)
+    news_df = news_df.groupby(['Date', 'source']).agg({'news': ' '.join}).reset_index()
 
     # Save the updated cache data to the file
     with open(cache_file, "wb") as file:
@@ -301,21 +393,33 @@ def scrape_news_data(stock, start_date, end_date):
     return news_df
 
 
-def get_stock_data(symbol, start_date, end_date):
+def get_stock_data(stock_symbol, start_date, end_date):
+    start_datetime = datetime.strptime(start_date, "%Y-%m-%dT%H:%M:%S")
+    end_datetime = datetime.strptime(end_date, "%Y-%m-%dT%H:%M:%S")
+    start_date = start_datetime.strftime('%Y-%m-%d')
+    end_date = end_datetime.strftime('%Y-%m-%d')
+
+    if start_datetime >= end_datetime:
+        raise ValueError("start_date should be earlier than end_date")
     # Check if cached data exists
-    cache_file = f'{symbol}_{start_date}_{end_date}.pickle'
+    cache_file = f'{stock_symbol}_{start_date}_{end_date}.pickle'
     if os.path.exists(cache_file):
         with open(cache_file, 'rb') as f:
             return pickle.load(f)
 
     # Fetch new data
-    data = yf.download(symbol, start=start_date, end=end_date)
+    data = yf.download(stock_symbol, start=start_date, end=end_date)
+    data = data.reset_index()
+    data['Date'] = pd.to_datetime(data['Date']).dt.date
+    data.set_index('Date', inplace=True)
 
     # Cache the data
     with open(cache_file, 'wb') as f:
         pickle.dump(data, f)
 
     return data
+
+
 
 
 # Define the stocks to analyze
@@ -329,21 +433,62 @@ stocks = {
 for company_name, stock_symbol in stocks.items():
     print(f"Running backtest for {company_name} ({stock_symbol})")
     
-    news_df, news_start_date, news_end_date = get_historical_news_data(company_name, "2019-01-01", "2019-12-31")
-    stock_data = get_stock_data(stock_symbol, news_start_date, news_end_date)
+    news_df, news_start_date, news_end_date = get_historical_news_data(company_name, '2019-01-01T00:00:00', '2019-12-31T23:59:59')
+    if 'datetime' in news_df.columns:
+        news_df = news_df.rename(columns={'datetime': 'Date'})
+
+    # news_df['datetime'] = pd.to_datetime(news_df['datetime'])
+    print(f"news_start_date: {news_start_date}, news_end_date: {news_end_date}")
     
-    display(news_df)
+    news_start_date, news_end_date = ('2019-01-01T00:00:00', '2019-12-31T23:59:59')
+        
+    stock_data = get_stock_data(stock_symbol, news_start_date, news_end_date)
+    stock_data.index = pd.to_datetime(stock_data.index)
+    # print(stock_data.columns)
+    # print(stock_data.index)
+    # stock_data['Date'] = pd.to_datetime(stock_data['Date'])
+
+    news_df.set_index('Date', inplace=True)
+    # print(news_df.columns)
+    # print(news_df.index)
     print(f"{stock_symbol}_filtered dataframe:")
     print(stock_data)
     print("news_df dataframe:")
     print(news_df)
 
-    combined_df = stock_data.join(news_df, how='inner')
-    
+    # Merge the two dataframes using inner join
+    combined_df = pd.merge(stock_data, news_df, how='inner',left_index=True, right_index=True)
+    print(combined_df.isnull().sum())
+    print(combined_df.dtypes)
+
+
+    # Drop the datetime column and reset the index
+    # combined_df.drop(columns=['datetime'], inplace=True)
+    # combined_df.set_index('Date', inplace=True)
+
+    print(f"combined dataframe: {combined_df}")
     strategy_class = sentiment_strategy_wrapper(stock_symbol)
+
     bt = Backtest(combined_df, strategy_class, cash=10000, commission=.002, exclusive_orders=True)
     
     stats = bt.run()
     display(stats)
     bt.plot()
-    
+
+# for company_name, stock_symbol in stocks.items():
+#     class BuyAndHoldStrategy(Strategy):
+#         def init(self):
+#             pass
+
+#         def next(self):
+#             if not self.position:
+#                 self.buy()
+
+#     news_start_date, news_end_date = ('2019-01-01T00:00:00', '2019-12-31T23:59:59')
+
+#     stock_data = get_stock_data(stock_symbol, news_start_date, news_end_date)
+#     stock_data = get_stock_data(stock_symbol, news_start_date, news_end_date)
+#     stock_data.index = pd.to_datetime(stock_data.index)  # Convert the index to DateTimeIndex
+#     print(stock_data.index.to_series().diff().fillna(pd.Timedelta(seconds=0)))
+#     bt = Backtest(stock_data, BuyAndHoldStrategy, cash=10000, commission=.002, exclusive_orders=True)
+#     stats = bt.run()
